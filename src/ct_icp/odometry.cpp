@@ -440,11 +440,13 @@ namespace ct_icp {
                 }
                 summary.relative_distance = (trajectory_[index_frame].end_t - trajectory_[index_frame].begin_t).norm();
 
+                // 根据上面的各种相对motion的计算,判断配准的准确性
                 good_enough_registration = AssessRegistration(frame, summary,
                                                               kDisplay ? &log_out : nullptr);
                 if (options_.robust_fail_early)
                     summary.success = good_enough_registration;
 
+                // 如果配准没有成功,就提升robust_level,再次尝试配准,直到尝试了足够多的次数还未配准,抛出错误提示
                 if (!good_enough_registration) {
                     if (options_.robust_registration && summary.number_of_attempts < options_.robust_num_attempts) {
                         // Either fail or
@@ -488,6 +490,7 @@ namespace ct_icp {
             }
         }
 
+        // 处理第0帧时,清空voxel_map_
         if (index_frame == 0) {
             voxel_map_.clear();
         }
@@ -539,6 +542,7 @@ namespace ct_icp {
 
         }
 
+        // 配准好当前帧后,把对应的点注册到Voxel Map
         if (add_points) {
             //Update Voxel Map+
             AddPointsToMap(voxel_map_, frame, kSizeVoxelMap,
@@ -566,6 +570,7 @@ namespace ct_icp {
         // Remove voxels too far from actual position of the vehicule
         const double kMaxDistance = options_.max_distance;
         const Eigen::Vector3d location = trajectory_[index_frame].end_t;
+        // 通过判断voxel map中的voxel中的点距离当前帧的距离是否大于一定阈值,若大于阈值,则把这个voxel从voxel map中移除出去
         RemovePointsFarFromLocation(voxel_map_, location, kMaxDistance);
 
 
@@ -581,12 +586,13 @@ namespace ct_icp {
             log_out << "Elapsed Time: " << elapsed_seconds.count() * 1000.0 << " (ms)" << std::endl;
         }
 
-        summary.corrected_points = frame;
-        summary.all_corrected_points = const_frame;
+        summary.corrected_points = frame;   // 再次挑选的关键点
+        summary.all_corrected_points = const_frame;  //当前帧中的所有的点
 
         Eigen::Quaterniond q_begin(summary.frame.begin_R);
         Eigen::Quaterniond q_end(summary.frame.end_R);
 
+        // 把当前帧中的所有的点,根据优化得到的当前帧的motion,计算出对应的世界坐标系下的坐标
         for (auto &point3D: summary.all_corrected_points) {
             double timestamp = point3D.alpha_timestamp;
             Eigen::Quaterniond slerp = q_begin.slerp(timestamp, q_end).normalized();
@@ -679,24 +685,26 @@ namespace ct_icp {
                 double ratio_half_full_voxel = 0;
 
                 for (auto &point: points) {
-                    voxel = Voxel::Coordinates(point.pt, kSizeVoxelMap);
+                    //得到点point在map中处于哪个voxel
+                    voxel = Voxel::Coordinates(point.pt, kSizeVoxelMap); 
                     if (voxel_map_.find(voxel) == voxel_map_.end())
                         ratio_empty_voxel += 1;
                     if (voxel_map_.find(voxel) != voxel_map_.end() &&
                         voxel_map_.at(voxel).NumPoints() > options_.max_num_points_in_voxel / 2) {
-                        // Only count voxels which have at least
+                        // Only count voxels which have at least half
                         ratio_half_full_voxel += 1;
                     }
                 }
 
-                ratio_empty_voxel /= points.size();
-                ratio_half_full_voxel /= points.size();
+                ratio_empty_voxel /= points.size();  //空voxel的比例
+                ratio_half_full_voxel /= points.size();  // 点数超过一半的voxel的比例
 
                 if (log_stream != nullptr)
                     *log_stream << "[Quality Assessment] Keypoint Ratio of voxel half occupied: " <<
                                 ratio_half_full_voxel << std::endl
                                 << "[Quality Assessment] Keypoint Ratio of empty voxel " <<
                                 ratio_empty_voxel << std::endl;
+                // 通过voxel的占有比例,判断是否配准成功
                 if (ratio_half_full_voxel < options_.robust_full_voxel_threshold ||
                     ratio_empty_voxel > options_.robust_empty_voxel_threshold) {
                     success = false;
@@ -803,8 +811,10 @@ namespace ct_icp {
     }
 
     /* -------------------------------------------------------------------------------------------------------------- */
+    // 把一个点添加到Voxel Map中
     inline void AddPointToMap(VoxelHashMap &map, const Eigen::Vector3d &point, double voxel_size,
                               int max_num_points_in_voxel, double min_distance_points, int min_num_points = 0) {
+        //计算这个点在Voxel Map中所属的voxel
         short kx = static_cast<short>(point[0] / voxel_size);
         short ky = static_cast<short>(point[1] / voxel_size);
         short kz = static_cast<short>(point[2] / voxel_size);
@@ -813,8 +823,10 @@ namespace ct_icp {
         if (search != map.end()) {
             auto &voxel_block = (search.value());
 
+            // 如果所属的voxel里的点还未满
             if (!voxel_block.IsFull()) {
                 double sq_dist_min_to_points = 10 * voxel_size * voxel_size;
+                // 计算当前voxel中的点距离当前点的最小距离
                 for (int i(0); i < voxel_block.NumPoints(); ++i) {
                     auto &_point = voxel_block.points[i];
                     double sq_dist = (_point - point).squaredNorm();
@@ -822,13 +834,14 @@ namespace ct_icp {
                         sq_dist_min_to_points = sq_dist;
                     }
                 }
+                // 当最小距离大于一定阈值时,把这个点添加到voxel map中
                 if (sq_dist_min_to_points > (min_distance_points * min_distance_points)) {
                     if (min_num_points <= 0 || voxel_block.NumPoints() >= min_num_points) {
                         voxel_block.AddPoint(point);
                     }
                 }
             }
-        } else {
+        } else {  // 如果当前点所属的voxel未在当前voxel map中, 新建一个voxel,把点加进去
             if (min_num_points <= 0) {
                 // Do not add points (avoids polluting the map)
                 VoxelBlock block(max_num_points_in_voxel);
